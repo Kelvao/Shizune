@@ -30,15 +30,18 @@ jobs:
       fail-fast: false
       matrix:
         distro:
-          - name: Ubuntu 24.04 (Noble)
-            image: ubuntu:24.04
-            setup: apt-get update && apt-get install -y curl build-essential pkg-config libasound2-dev libfontconfig1-dev libpipewire-0.3-dev libspa-0.2-dev clang libclang-dev
-          - name: Fedora 40
-            image: fedora:40
-            setup: dnf install -y curl gcc pkg-config alsa-lib-devel fontconfig-devel pipewire-devel clang clang-devel
+          - name: Ubuntu Latest
+            image: ubuntu:latest
+            setup: apt-get update && apt-get install -y curl build-essential pkg-config libasound2-dev libfontconfig1-dev clang libclang-dev
+          - name: Debian Stable
+            image: debian:stable-slim
+            setup: apt-get update && apt-get install -y curl build-essential pkg-config libasound2-dev libfontconfig1-dev clang libclang-dev
+          - name: Fedora Latest
+            image: fedora:latest
+            setup: dnf install -y curl gcc pkg-config alsa-lib-devel fontconfig-devel clang clang-devel
           - name: Arch Linux
             image: archlinux:latest
-            setup: pacman -Syu --noconfirm base-devel curl alsa-lib fontconfig pipewire clang pkgconf
+            setup: pacman -Syu --noconfirm base-devel curl alsa-lib fontconfig clang pkgconf
     container:
       image: ${{ matrix.distro.image }}
     steps:
@@ -53,11 +56,6 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.distro.name }}
-
       - name: Run test suite (All Features)
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
@@ -66,7 +64,7 @@ jobs:
       - name: Build release binary
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
-          cargo build --release --features "gui,pipewire-backend"
+          cargo build --release --features "gui"
 
       - name: Verify CLI help execution
         run: |
@@ -78,7 +76,7 @@ jobs:
   # =========================================================================
   build-packages:
     name: Build Linux Packages (x86_64)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -87,7 +85,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential pkg-config libasound2-dev libfontconfig1-dev libpipewire-0.3-dev libspa-0.2-dev \
+            build-essential pkg-config libasound2-dev libfontconfig1-dev \
             clang libclang-dev rpm file curl zsync libfuse2 appstream
 
       - name: Install Rust Toolchain
@@ -114,8 +112,8 @@ jobs:
           mkdir -p dist
           chmod +x packaging/*.sh
 
-      - name: Compile release binary (GUI & PipeWire)
-        run: cargo build --release --features "gui,pipewire-backend"
+      - name: Compile release binary (GUI)
+        run: cargo build --release --features "gui"
 
       - name: Generate Portable Tarball (x86_64)
         run: |

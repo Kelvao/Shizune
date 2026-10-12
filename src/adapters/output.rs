@@ -373,10 +373,9 @@ impl AudioSink for PipeWireNativeSink {
                 *pipewire::keys::MEDIA_TYPE => "Audio",
                 *pipewire::keys::MEDIA_CATEGORY => "Capture",
                 *pipewire::keys::MEDIA_ROLE => "Communication",
-                *pipewire::keys::MEDIA_CLASS => "Audio/Source/Virtual",
+                *pipewire::keys::MEDIA_CLASS => "Audio/Source",
                 *pipewire::keys::NODE_NAME => source_name.as_str(),
                 *pipewire::keys::NODE_DESCRIPTION => source_name.as_str(),
-                *pipewire::keys::NODE_AUTOCONNECT => "false",
                 *pipewire::keys::AUDIO_CHANNELS => "1",
             };
 
@@ -515,21 +514,28 @@ pub fn create_audio_sink(consumer: HeapCons<f32>) -> Box<dyn AudioSink> {
     create_audio_sink_with_names(consumer, DEFAULT_SINK_NAME, DEFAULT_SOURCE_NAME)
 }
 
-/// Fallback factory creating the audio sink with custom device names.
+/// Factory creating the audio sink with custom device names.
+/// Uses the universal PulseAudio/PipeWire null-sink route by default for rock-solid stability across all Linux distros.
 pub fn create_audio_sink_with_names(
     consumer: HeapCons<f32>,
     sink_name: impl Into<String>,
     source_name: impl Into<String>,
 ) -> Box<dyn AudioSink> {
     let source_str: String = source_name.into();
+    let sink_str: String = sink_name.into();
+
     #[cfg(feature = "pipewire-backend")]
     {
-        if detect_pipewire_socket() {
+        let force_pipewire = std::env::var("SHIZUNE_BACKEND")
+            .map(|v| v.eq_ignore_ascii_case("pipewire"))
+            .unwrap_or(false);
+
+        if force_pipewire && detect_pipewire_socket() {
             return Box::new(PipeWireNativeSink::new(consumer, source_str));
         }
     }
 
-    Box::new(PulseAudioSink::with_names(consumer, sink_name, source_str))
+    Box::new(PulseAudioSink::with_names(consumer, sink_str, source_str))
 }
 
 #[cfg(test)]

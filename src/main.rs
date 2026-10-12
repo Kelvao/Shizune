@@ -130,6 +130,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Audio engine and I/O adapters initialized and running.");
 
+    #[allow(unused_mut)]
     let mut run_headless_loop = headless;
     #[cfg(feature = "gui")]
     if !headless {
