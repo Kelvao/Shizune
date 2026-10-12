@@ -14,6 +14,7 @@ fn print_help() {
     println!("  --list-devices            List all available input and output audio devices");
     println!("  --input <name>            Substring match for the input microphone device");
     println!("  --attenuation <dB>        Initial attenuation limit in dB [0.0 - 100.0] (default: 100.0)");
+    println!("  --headless                Run in headless mode without graphical interface");
     println!("  --help                    Show this help message");
 }
 
@@ -21,10 +22,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let mut input_device: Option<String> = None;
     let mut initial_attenuation: Option<f32> = None;
+    let mut headless = false;
 
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
+            "--headless" => {
+                headless = true;
+            }
             "--list-devices" => {
                 println!("=== Available Input Devices ===");
                 match CpalAudioSource::list_input_devices() {
@@ -125,14 +130,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Audio engine and I/O adapters initialized and running.");
 
+    let mut run_headless_loop = headless;
     #[cfg(feature = "gui")]
-    {
+    if !headless {
         println!("Starting Slint control panel...");
-        let _ = launch_gui(Arc::clone(&state));
+        if let Err(e) = launch_gui(Arc::clone(&state)) {
+            eprintln!("[Warning] GUI initialization failed ({e}). Falling back to headless terminal mode.");
+            run_headless_loop = true;
+        }
     }
 
-    #[cfg(not(feature = "gui"))]
-    {
+    if run_headless_loop {
         println!("Running in headless mode. Monitoring stream... Press Enter to stop.");
         let (stdin_tx, stdin_rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {

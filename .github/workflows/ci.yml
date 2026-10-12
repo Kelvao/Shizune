@@ -73,26 +73,22 @@ jobs:
           export PATH="$HOME/.cargo/bin:$PATH"
           ./target/release/shizune --help
 
-      - name: Upload Binary Artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: shizune-${{ matrix.distro.name }}
-          path: target/release/shizune
-
   # =========================================================================
-  # 2. STANDALONE APPIMAGE BUNDLE
+  # 2. PACKAGE GENERATION (.deb, .rpm, .AppImage, .tar.gz)
   # =========================================================================
-  build-appimage:
-    name: Build AppImage
+  build-packages:
+    name: Build Linux Packages (x86_64)
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      - name: Install Dependencies
+      - name: Install packaging dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libasound2-dev libfontconfig1-dev libpipewire-0.3-dev libspa-0.2-dev clang libclang-dev
+          sudo apt-get install -y \
+            build-essential pkg-config libasound2-dev libfontconfig1-dev libpipewire-0.3-dev libspa-0.2-dev \
+            clang libclang-dev rpm file curl zsync libfuse2 appstream
 
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -100,27 +96,85 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
-          key: appimage
+          key: packaging-x86_64
 
-      - name: Build Release Binary
+      - name: Determine version
+        id: get_version
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="0.1.0"
+          fi
+          echo "VERSION=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Target version: ${VERSION}"
+
+      - name: Create output directory
+        run: |
+          mkdir -p dist
+          chmod +x packaging/*.sh
+
+      - name: Compile release binary (GUI & PipeWire)
         run: cargo build --release --features "gui,pipewire-backend"
 
-      - name: Package AppDir
-        run: ./scripts/build-appimage.sh
-
-      - name: Download appimagetool
+      - name: Generate Portable Tarball (x86_64)
         run: |
-          curl -sLO https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
-          chmod +x appimagetool-x86_64.AppImage
-          ./appimagetool-x86_64.AppImage --appimage-extract
-          mv squashfs-root appimagetool.AppDir
+          TAR_DIR="shizune-v${{ steps.get_version.outputs.VERSION }}-linux-x86_64"
+          mkdir -p "${TAR_DIR}"
+          cp target/release/shizune "${TAR_DIR}/"
+          cp assets/shizune.desktop "${TAR_DIR}/"
+          mkdir -p "${TAR_DIR}/assets"
+          cp assets/shizune.svg "${TAR_DIR}/assets/"
+          cp README.md "${TAR_DIR}/"
+          tar -czvf "dist/${TAR_DIR}.tar.gz" "${TAR_DIR}"
+          rm -rf "${TAR_DIR}"
 
-      - name: Generate AppImage
+      - name: Build Debian Package (.deb x86_64)
+        run: ./packaging/build-deb.sh "${{ steps.get_version.outputs.VERSION }}" "amd64"
+
+      - name: Build RPM Package (.rpm x86_64)
+        run: ./packaging/build-rpm.sh "${{ steps.get_version.outputs.VERSION }}" "x86_64"
+
+      - name: Build Universal AppImage (x86_64)
+        run: ./packaging/build-appimage.sh "${{ steps.get_version.outputs.VERSION }}" "x86_64"
+
+      - name: Generate SHA256 Checksums
         run: |
-          ARCH=x86_64 ./appimagetool.AppDir/AppRun AppDir Shizune-x86_64.AppImage
+          cd dist
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
 
-      - name: Upload AppImage Artifact
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: Shizune-x86_64.AppImage
-          path: Shizune-x86_64.AppImage
+          name: shizune-packages
+          path: dist/*
+          if-no-files-found: error
+
+  # =========================================================================
+  # 3. PUBLISH RELEASE TO GITHUB
+  # =========================================================================
+  publish-release:
+    name: Publish Release to GitHub
+    needs: [test-distros, build-packages]
+    if: >
+      github.event_name == 'release' ||
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+      (github.event_name == 'workflow_dispatch' && inputs.create_release == true)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Download generated artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: shizune-packages
+          path: dist
+
+      - name: Publish Release Assets
+        uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
