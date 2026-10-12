@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Shizune
+Comment=Deep Virtual Mic in Rust
+Exec=shizune
+Icon=shizune
+Type=Application
+Categories=AudioVideo;Audio;
+Terminal=false
+
