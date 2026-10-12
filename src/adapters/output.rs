@@ -107,6 +107,7 @@ pub struct PulseAudioSink {
     active: Arc<AtomicBool>,
     sink_name: String,
     source_name: String,
+    previous_default_source: Option<String>,
 }
 
 impl PulseAudioSink {
@@ -126,6 +127,7 @@ impl PulseAudioSink {
             active: Arc::new(AtomicBool::new(false)),
             sink_name: sink_name.into(),
             source_name: source_name.into(),
+            previous_default_source: None,
         }
     }
 
@@ -154,6 +156,22 @@ impl PulseAudioSink {
             "module-remap-source",
             &[&source_arg, &master_arg, &source_prop],
         )?;
+
+        // Query and store previous default recording source
+        if let Ok(output) = Command::new("pactl").arg("get-default-source").output()
+            && output.status.success()
+        {
+            let prev = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !prev.is_empty() && prev != self.source_name {
+                self.previous_default_source = Some(prev);
+            }
+        }
+
+        // Set the clean virtual microphone as the system default recording device
+        let _ = Command::new("pactl")
+            .arg("set-default-source")
+            .arg(&self.source_name)
+            .status();
 
         Ok(())
     }
@@ -293,6 +311,12 @@ impl AudioSink for PulseAudioSink {
         if let Some(stream) = self.stream.take() {
             drop(stream);
         }
+        if let Some(ref prev) = self.previous_default_source.take() {
+            let _ = Command::new("pactl")
+                .arg("set-default-source")
+                .arg(prev)
+                .status();
+        }
         self.pactl.unload_all();
         self.active.store(false, Ordering::Release);
         Ok(())
@@ -300,6 +324,12 @@ impl AudioSink for PulseAudioSink {
 
     fn is_active(&self) -> bool {
         self.active.load(Ordering::Acquire)
+    }
+}
+
+impl Drop for PulseAudioSink {
+    fn drop(&mut self) {
+        let _ = self.stop();
     }
 }
 

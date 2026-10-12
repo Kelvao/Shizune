@@ -24,6 +24,13 @@ slint::slint! {
                 horizontal-alignment: center;
             }
 
+            Text {
+                text: "Routing through Shizune_Virtual_Mic";
+                font-size: 11px;
+                color: #718096;
+                horizontal-alignment: center;
+            }
+
             HorizontalBox {
                 Text {
                     text: "Noise Suppression Active:";

@@ -133,7 +133,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Err(e) = sink.start() {
         eprintln!("[Warning] Audio output sink not started: {e}");
     } else {
-        println!("Virtual microphone output sink started.");
+        println!("Virtual microphone output sink started: Shizune_Virtual_Mic");
+        println!("[Info] Shizune_Virtual_Mic is active and set as system default recording device.");
+        println!("[Info] In voice apps (Discord, OBS, Steam), select 'Shizune_Virtual_Mic' or 'Default' to use filtered audio.");
     }
 
     println!("Audio engine and I/O adapters initialized and running.");

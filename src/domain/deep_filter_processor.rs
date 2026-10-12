@@ -87,17 +87,21 @@ impl AudioProcessor for DeepFilterProcessor {
             bin_offset += band_width;
         }
 
-        // 3. Update stationary noise floor tracking (slow recursive average)
+        // 3. Voice Activity Detection (VAD) & Adaptive noise floor tracking
+        let total_energy: f32 = self.band_energies.iter().sum();
+        let total_noise: f32 = self.noise_floor.iter().sum();
+        let is_speech = total_energy > total_noise * 1.8;
+
         for (floor, &energy) in self.noise_floor.iter_mut().zip(self.band_energies.iter()) {
             if energy < *floor {
                 *floor = energy;
-            } else {
-                *floor = *floor * 0.995 + energy * 0.005;
+            } else if !is_speech {
+                // Adapt noise floor only during pauses/silence to prevent speech absorption
+                *floor = *floor * 0.98 + energy * 0.02;
             }
         }
 
-        // 4. Estimate raw Wiener-style suppression mask per ERB band:
-        //    M(b) = max(0.0, 1.0 - (noise_floor / signal_energy))
+        // 4. Estimate spectral over-subtraction suppression mask per ERB band:
         let min_gain = Self::atten_lim_to_min_gain(atten_lim_db);
         for ((mask, &energy), &floor) in self
             .erb_mask
@@ -106,8 +110,9 @@ impl AudioProcessor for DeepFilterProcessor {
             .zip(self.noise_floor.iter())
         {
             let raw_gain = if energy > 1e-8 {
-                let snr_gain = 1.0 - (floor / energy).sqrt();
-                snr_gain.clamp(0.0, 1.0)
+                let snr = (floor / energy).min(1.0);
+                let gain = 1.0 - (1.5 * snr).sqrt();
+                gain.clamp(0.0, 1.0)
             } else {
                 0.0
             };
