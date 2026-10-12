@@ -13,7 +13,9 @@ permissions:
 jobs:
   matrix-builds:
     name: Build on ${{ matrix.distro }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     strategy:
       fail-fast: false
       matrix:
@@ -63,6 +65,8 @@ jobs:
   appimage:
     name: Build AppImage
     runs-on: ubuntu-22.04
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

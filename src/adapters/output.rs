@@ -291,6 +291,212 @@ impl AudioSink for PulseAudioSink {
     }
 }
 
+#[cfg(feature = "pipewire-backend")]
+pub struct PipeWireNativeSink {
+    consumer: Arc<Mutex<Option<HeapCons<f32>>>>,
+    active: Arc<AtomicBool>,
+    source_name: String,
+    thread_handle: Option<std::thread::JoinHandle<()>>,
+    stop_signal: Arc<AtomicBool>,
+}
+
+#[cfg(feature = "pipewire-backend")]
+impl PipeWireNativeSink {
+    pub fn new(consumer: HeapCons<f32>, source_name: impl Into<String>) -> Self {
+        Self {
+            consumer: Arc::new(Mutex::new(Some(consumer))),
+            active: Arc::new(AtomicBool::new(false)),
+            source_name: source_name.into(),
+            thread_handle: None,
+            stop_signal: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+#[cfg(feature = "pipewire-backend")]
+impl AudioSink for PipeWireNativeSink {
+    fn start(&mut self) -> Result<(), SinkError> {
+        if self.is_active() {
+            return Ok(());
+        }
+
+        let consumer_holder = Arc::clone(&self.consumer);
+        let active_holder = Arc::clone(&self.active);
+        let stop_clone = Arc::clone(&self.stop_signal);
+        let source_name = self.source_name.clone();
+
+        stop_clone.store(false, Ordering::Release);
+        self.active.store(true, Ordering::Release);
+
+        self.thread_handle = Some(std::thread::spawn(move || {
+            pipewire::init();
+            let mainloop = match pipewire::main_loop::MainLoopRc::new(None) {
+                Ok(ml) => ml,
+                Err(e) => {
+                    eprintln!("[PipeWire Sink] Failed to create main loop: {e}");
+                    active_holder.store(false, Ordering::Release);
+                    return;
+                }
+            };
+
+            let context = match pipewire::context::ContextRc::new(&mainloop, None) {
+                Ok(ctx) => ctx,
+                Err(e) => {
+                    eprintln!("[PipeWire Sink] Failed to create context: {e}");
+                    active_holder.store(false, Ordering::Release);
+                    return;
+                }
+            };
+
+            let core = match context.connect_rc(None) {
+                Ok(core) => core,
+                Err(e) => {
+                    eprintln!("[PipeWire Sink] Failed to connect to core: {e}");
+                    active_holder.store(false, Ordering::Release);
+                    return;
+                }
+            };
+
+            let props = pipewire::properties::properties! {
+                *pipewire::keys::MEDIA_TYPE => "Audio",
+                *pipewire::keys::MEDIA_CATEGORY => "Source",
+                *pipewire::keys::MEDIA_CLASS => "Audio/Source/Virtual",
+                *pipewire::keys::NODE_NAME => source_name.as_str(),
+                *pipewire::keys::NODE_DESCRIPTION => source_name.as_str(),
+                *pipewire::keys::AUDIO_CHANNELS => "1",
+            };
+
+            let stream = match pipewire::stream::StreamBox::new(&core, &source_name, props) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("[PipeWire Sink] Failed to create stream: {e}");
+                    active_holder.store(false, Ordering::Release);
+                    return;
+                }
+            };
+
+            let cons_for_proc = Arc::clone(&consumer_holder);
+            let listener_res = stream
+                .add_local_listener::<()>()
+                .process(move |stream, _: &mut ()| {
+                    if let Some(mut buffer) = stream.dequeue_buffer() {
+                        let datas = buffer.datas_mut();
+                        if datas.is_empty() {
+                            return;
+                        }
+                        let data = &mut datas[0];
+                        let stride = std::mem::size_of::<f32>();
+                        let n_frames = if let Some(slice) = data.data() {
+                            let frames_available = slice.len() / stride;
+                            let out_f32: &mut [f32] = unsafe {
+                                std::slice::from_raw_parts_mut(
+                                    slice.as_mut_ptr() as *mut f32,
+                                    frames_available,
+                                )
+                            };
+
+                            if let Ok(mut guard) = cons_for_proc.try_lock()
+                                && let Some(ref mut cons) = *guard
+                            {
+                                let popped = cons.pop_slice(out_f32);
+                                if popped < frames_available {
+                                    out_f32[popped..].fill(0.0);
+                                }
+                            } else {
+                                out_f32.fill(0.0);
+                            }
+                            frames_available
+                        } else {
+                            0
+                        };
+                        let chunk = data.chunk_mut();
+                        *chunk.offset_mut() = 0;
+                        *chunk.stride_mut() = stride as _;
+                        *chunk.size_mut() = (stride * n_frames) as _;
+                    }
+                })
+                .register();
+
+            let _listener = match listener_res {
+                Ok(l) => l,
+                Err(e) => {
+                    eprintln!("[PipeWire Sink] Failed to register listener: {e}");
+                    active_holder.store(false, Ordering::Release);
+                    return;
+                }
+            };
+
+            let mut audio_info = pipewire::spa::param::audio::AudioInfoRaw::new();
+            audio_info.set_format(pipewire::spa::param::audio::AudioFormat::F32LE);
+            audio_info.set_rate(SAMPLE_RATE);
+            audio_info.set_channels(1);
+            let mut position = [0; pipewire::spa::param::audio::MAX_CHANNELS];
+            position[0] = pipewire::spa::sys::SPA_AUDIO_CHANNEL_MONO;
+            audio_info.set_position(position);
+
+            let values: Vec<u8> = match pipewire::spa::pod::serialize::PodSerializer::serialize(
+                std::io::Cursor::new(Vec::new()),
+                &pipewire::spa::pod::Value::Object(pipewire::spa::pod::Object {
+                    type_: pipewire::spa::sys::SPA_TYPE_OBJECT_Format,
+                    id: pipewire::spa::sys::SPA_PARAM_EnumFormat,
+                    properties: audio_info.into(),
+                }),
+            ) {
+                Ok((cursor, _)) => cursor.into_inner(),
+                Err(e) => {
+                    eprintln!("[PipeWire Sink] Failed to serialize Pod: {e}");
+                    active_holder.store(false, Ordering::Release);
+                    return;
+                }
+            };
+
+            let pod = match pipewire::spa::pod::Pod::from_bytes(&values) {
+                Some(p) => p,
+                None => {
+                    eprintln!("[PipeWire Sink] Failed to parse Pod bytes");
+                    active_holder.store(false, Ordering::Release);
+                    return;
+                }
+            };
+            let mut params = [pod];
+
+            if let Err(e) = stream.connect(
+                pipewire::spa::utils::Direction::Output,
+                None,
+                pipewire::stream::StreamFlags::AUTOCONNECT
+                    | pipewire::stream::StreamFlags::MAP_BUFFERS
+                    | pipewire::stream::StreamFlags::RT_PROCESS,
+                &mut params,
+            ) {
+                eprintln!("[PipeWire Sink] Failed to connect stream: {e}");
+                active_holder.store(false, Ordering::Release);
+                return;
+            }
+
+            let loop_ref = mainloop.loop_();
+            while !stop_clone.load(Ordering::Relaxed) {
+                let _ = loop_ref.iterate(pipewire::loop_::Timeout::Finite(std::time::Duration::from_millis(10)));
+            }
+            active_holder.store(false, Ordering::Release);
+        }));
+
+        Ok(())
+    }
+
+    fn stop(&mut self) -> Result<(), SinkError> {
+        self.stop_signal.store(true, Ordering::Release);
+        if let Some(handle) = self.thread_handle.take() {
+            let _ = handle.join();
+        }
+        self.active.store(false, Ordering::Release);
+        Ok(())
+    }
+
+    fn is_active(&self) -> bool {
+        self.active.load(Ordering::Acquire)
+    }
+}
+
 /// Fallback factory creating the appropriate audio sink depending on system backend.
 pub fn create_audio_sink(consumer: HeapCons<f32>) -> Box<dyn AudioSink> {
     create_audio_sink_with_names(consumer, DEFAULT_SINK_NAME, DEFAULT_SOURCE_NAME)
@@ -302,8 +508,15 @@ pub fn create_audio_sink_with_names(
     sink_name: impl Into<String>,
     source_name: impl Into<String>,
 ) -> Box<dyn AudioSink> {
-    let _pipewire_available = detect_pipewire_socket();
-    Box::new(PulseAudioSink::with_names(consumer, sink_name, source_name))
+    let source_str: String = source_name.into();
+    #[cfg(feature = "pipewire-backend")]
+    {
+        if detect_pipewire_socket() {
+            return Box::new(PipeWireNativeSink::new(consumer, source_str));
+        }
+    }
+
+    Box::new(PulseAudioSink::with_names(consumer, sink_name, source_str))
 }
 
 #[cfg(test)]
@@ -319,5 +532,18 @@ mod tests {
     fn test_pactl_manager_raii_initial_state() {
         let manager = PactlManager::new();
         assert_eq!(manager.loaded_count(), 0);
+    }
+
+    #[cfg(feature = "pipewire-backend")]
+    #[test]
+    fn test_pipewire_native_sink_initial_state() {
+        use ringbuf::traits::Split;
+        use ringbuf::HeapRb;
+
+        let rb = HeapRb::<f32>::new(480);
+        let (_prod, cons) = rb.split();
+        let sink = PipeWireNativeSink::new(cons, "Test_PW_Sink");
+        assert!(!sink.is_active());
+        assert_eq!(sink.source_name, "Test_PW_Sink");
     }
 }
