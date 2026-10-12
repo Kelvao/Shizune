@@ -160,16 +160,28 @@ impl PulseAudioSink {
 
     fn build_playback_stream(&mut self) -> Result<Stream, SinkError> {
         let host = cpal::default_host();
-        let device = host
-            .output_devices()
-            .map_err(|e| SinkError::ServerUnavailable(e.to_string()))?
-            .find(|d| {
-                d.name()
-                    .map(|name| name.contains(&self.sink_name))
-                    .unwrap_or(false)
-            })
-            .or_else(|| host.default_output_device())
-            .ok_or_else(|| SinkError::ServerUnavailable("No output device found".into()))?;
+        // Wait up to 500ms for PulseAudio/PipeWire-Pulse to register the newly created null sink
+        let mut device = None;
+        for _ in 0..10 {
+            if let Ok(mut devices) = host.output_devices()
+                && let Some(d) = devices.find(|d| {
+                    d.name()
+                        .map(|name| name.contains(&self.sink_name))
+                        .unwrap_or(false)
+                })
+            {
+                device = Some(d);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        let device = device.ok_or_else(|| {
+            SinkError::ServerUnavailable(format!(
+                "Virtual sink '{}' was created but not found in output devices. Refusing to play back into physical speakers.",
+                self.sink_name
+            ))
+        })?;
 
         let default_config = device
             .default_output_config()
@@ -359,10 +371,12 @@ impl AudioSink for PipeWireNativeSink {
 
             let props = pipewire::properties::properties! {
                 *pipewire::keys::MEDIA_TYPE => "Audio",
-                *pipewire::keys::MEDIA_CATEGORY => "Source",
+                *pipewire::keys::MEDIA_CATEGORY => "Capture",
+                *pipewire::keys::MEDIA_ROLE => "Communication",
                 *pipewire::keys::MEDIA_CLASS => "Audio/Source/Virtual",
                 *pipewire::keys::NODE_NAME => source_name.as_str(),
                 *pipewire::keys::NODE_DESCRIPTION => source_name.as_str(),
+                *pipewire::keys::NODE_AUTOCONNECT => "false",
                 *pipewire::keys::AUDIO_CHANNELS => "1",
             };
 
@@ -463,8 +477,7 @@ impl AudioSink for PipeWireNativeSink {
             if let Err(e) = stream.connect(
                 pipewire::spa::utils::Direction::Output,
                 None,
-                pipewire::stream::StreamFlags::AUTOCONNECT
-                    | pipewire::stream::StreamFlags::MAP_BUFFERS
+                pipewire::stream::StreamFlags::MAP_BUFFERS
                     | pipewire::stream::StreamFlags::RT_PROCESS,
                 &mut params,
             ) {
