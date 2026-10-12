@@ -1,0 +1,9 @@
+prefix=${pcfiledir}
+libdir=${prefix}
+includedir=${prefix}/include/spa-0.2
+
+Name: libspa-0.2
+Description: Simple Plugin Architecture
+Version: 0.2
+Cflags: -I${includedir}
+

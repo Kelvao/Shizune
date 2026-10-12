@@ -1,0 +1,6 @@
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-L", ".pkgconfig"]
+
+[env]
+PKG_CONFIG_PATH = { value = ".pkgconfig", relative = true }
+BINDGEN_EXTRA_CLANG_ARGS = "-isystem /usr/lib/clang/22/include -isystem /usr/include"

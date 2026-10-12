@@ -1,0 +1,167 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+use shizune::adapters::cpal_source::CpalAudioSource;
+use shizune::adapters::output::{create_audio_sink, detect_pipewire_socket};
+#[cfg(feature = "gui")]
+use shizune::adapters::ui::launch_gui;
+use shizune::domain::{AudioConfig, AudioEngine, BufferPipeline, DeepFilterProcessor, EngineState};
+use shizune::ports::source::AudioSource;
+
+fn print_help() {
+    println!("Usage: shizune [OPTIONS]");
+    println!("Options:");
+    println!("  --list-devices            List all available input and output audio devices");
+    println!("  --input <name>            Substring match for the input microphone device");
+    println!("  --attenuation <dB>        Initial attenuation limit in dB [0.0 - 100.0] (default: 100.0)");
+    println!("  --help                    Show this help message");
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = std::env::args().collect();
+    let mut input_device: Option<String> = None;
+    let mut initial_attenuation: Option<f32> = None;
+
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--list-devices" => {
+                println!("=== Available Input Devices ===");
+                match CpalAudioSource::list_input_devices() {
+                    Ok(devices) => {
+                        for d in devices {
+                            println!("  - {d}");
+                        }
+                    }
+                    Err(e) => eprintln!("Error listing input devices: {e}"),
+                }
+                println!("\n=== Available Output Devices ===");
+                match shizune::adapters::output::PulseAudioSink::list_output_devices() {
+                    Ok(devices) => {
+                        for d in devices {
+                            println!("  - {d}");
+                        }
+                    }
+                    Err(e) => eprintln!("Error listing output devices: {e}"),
+                }
+                return Ok(());
+            }
+            "--input" => {
+                if i + 1 < args.len() {
+                    input_device = Some(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            "--attenuation" => {
+                if i + 1 < args.len() {
+                    if let Ok(val) = args[i + 1].parse::<f32>() {
+                        initial_attenuation = Some(val);
+                    }
+                    i += 1;
+                }
+            }
+            "--help" | "-h" => {
+                print_help();
+                return Ok(());
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    let config = AudioConfig::default();
+    let state = EngineState::new_shared();
+    if let Some(atten) = initial_attenuation {
+        state.attenuation_limit.set(atten);
+    }
+
+    println!("=======================================================");
+    println!("  Shizune: Deep Virtual Mic (Rust)                     ");
+    println!("=======================================================");
+    println!(
+        "Audio Config: {} Hz | Frame: {} samples ({:.1} ms) | Buffer: {} samples ({:.1} ms)",
+        config.sample_rate,
+        config.frame_size,
+        config.frame_duration_ms(),
+        config.ring_buffer_capacity,
+        config.buffer_duration_ms()
+    );
+    println!(
+        "Initial State: Enabled={} | Attenuation Limit={:.1} dB",
+        state.is_enabled(),
+        state.attenuation_limit.get()
+    );
+
+    let pipewire_detected = detect_pipewire_socket();
+    println!(
+        "Server Handshake: PipeWire socket present = {pipewire_detected} (fallback route: PulseAudio null-sink)"
+    );
+
+    let pipeline = BufferPipeline::new(config.ring_buffer_capacity);
+    let processor = DeepFilterProcessor::new();
+
+    let stop_signal = Arc::new(AtomicBool::new(false));
+    let engine = AudioEngine::new(
+        pipeline.input_cons,
+        pipeline.output_prod,
+        Arc::clone(&state),
+        processor,
+    );
+    let engine_handle = engine.spawn(Arc::clone(&stop_signal));
+
+    let mut source = CpalAudioSource::new_with_device(pipeline.input_prod, input_device);
+    if let Err(e) = source.start() {
+        eprintln!("[Warning] Audio capture input not started: {e}");
+    } else {
+        println!("Microphone capture stream started.");
+    }
+
+    let mut sink = create_audio_sink(pipeline.output_cons);
+    if let Err(e) = sink.start() {
+        eprintln!("[Warning] Audio output sink not started: {e}");
+    } else {
+        println!("Virtual microphone output sink started.");
+    }
+
+    println!("Audio engine and I/O adapters initialized and running.");
+
+    #[cfg(feature = "gui")]
+    {
+        println!("Starting Slint control panel...");
+        let _ = launch_gui(Arc::clone(&state));
+    }
+
+    #[cfg(not(feature = "gui"))]
+    {
+        println!("Running in headless mode. Monitoring stream... Press Enter to stop.");
+        let (stdin_tx, stdin_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut input = String::new();
+            let _ = std::io::stdin().read_line(&mut input);
+            let _ = stdin_tx.send(());
+        });
+
+        loop {
+            if stdin_rx.try_recv().is_ok() {
+                break;
+            }
+            if !source.is_active() {
+                match source.reconnect_if_needed() {
+                    Ok(true) => println!("[Auto-Reconnect] Microphone reconnected successfully."),
+                    Ok(false) => {}
+                    Err(e) => eprintln!("[Auto-Reconnect] Failed to reconnect microphone: {e}"),
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+    }
+
+    println!("Shutting down Shizune...");
+    stop_signal.store(true, Ordering::Relaxed);
+    let _ = source.stop();
+    let _ = sink.stop();
+    let _ = engine_handle.join();
+    println!("Clean shutdown complete.");
+
+    Ok(())
+}

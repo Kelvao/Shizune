@@ -1,0 +1,16 @@
+[package]
+name = "shizune"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+cpal = "0.15"
+ringbuf = "0.4"
+deep_filter = "0.2.5"
+pipewire = { version = "0.10", optional = true }
+slint = { version = "1.18", optional = true }
+
+[features]
+default = []
+pipewire-backend = ["dep:pipewire"]
+gui = ["dep:slint"]
