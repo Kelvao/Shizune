@@ -1,44 +1,52 @@
-name: CI & Distribution Builds
+name: Build & Release Multi-Distro Linux Binaries
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ main, master ]
+    tags: [ 'v*' ]
   pull_request:
-    branches: [ "main" ]
+    branches: [ main, master ]
+  release:
+    types: [ published ]
   workflow_dispatch:
+    inputs:
+      create_release:
+        description: 'Publish release to GitHub automatically?'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
 
 jobs:
-  matrix-builds:
-    name: Build on ${{ matrix.distro }}
+  # =========================================================================
+  # 1. TEST MATRIX ACROSS MULTIPLE LINUX DISTRIBUTIONS
+  # =========================================================================
+  test-distros:
+    name: Test build on ${{ matrix.distro.name }}
     runs-on: ubuntu-24.04
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - distro: "Ubuntu 24.04 (Noble)"
-            container: "ubuntu:24.04"
-            setup_cmd: "apt-get update && apt-get install -y curl build-essential pkg-config libasound2-dev libfontconfig1-dev libpipewire-0.3-dev libspa-0.2-dev clang libclang-dev"
-          - distro: "Fedora 40"
-            container: "fedora:40"
-            setup_cmd: "dnf install -y curl gcc pkg-config alsa-lib-devel fontconfig-devel pipewire-devel clang clang-devel"
-          - distro: "Arch Linux"
-            container: "archlinux:latest"
-            setup_cmd: "pacman -Syu --noconfirm base-devel curl alsa-lib fontconfig pipewire clang pkgconf"
-
+        distro:
+          - name: Ubuntu 24.04 (Noble)
+            image: ubuntu:24.04
+            setup: apt-get update && apt-get install -y curl build-essential pkg-config libasound2-dev libfontconfig1-dev libpipewire-0.3-dev libspa-0.2-dev clang libclang-dev
+          - name: Fedora 40
+            image: fedora:40
+            setup: dnf install -y curl gcc pkg-config alsa-lib-devel fontconfig-devel pipewire-devel clang clang-devel
+          - name: Arch Linux
+            image: archlinux:latest
+            setup: pacman -Syu --noconfirm base-devel curl alsa-lib fontconfig pipewire clang pkgconf
     container:
-      image: ${{ matrix.container }}
-
+      image: ${{ matrix.distro.image }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
-      - name: Install System Dependencies
-        run: ${{ matrix.setup_cmd }}
+      - name: Install build dependencies
+        run: ${{ matrix.distro.setup }}
 
       - name: Install Rust Toolchain
         run: |
@@ -48,28 +56,38 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.distro }}
+          key: ${{ matrix.distro.name }}
 
-      - name: Build & Test (All Features)
+      - name: Run test suite (All Features)
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
           cargo test --all-features
+
+      - name: Build release binary
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
           cargo build --release --features "gui,pipewire-backend"
 
+      - name: Verify CLI help execution
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          ./target/release/shizune --help
+
       - name: Upload Binary Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: shizune-${{ matrix.distro }}
+          name: shizune-${{ matrix.distro.name }}
           path: target/release/shizune
 
-  appimage:
+  # =========================================================================
+  # 2. STANDALONE APPIMAGE BUNDLE
+  # =========================================================================
+  build-appimage:
     name: Build AppImage
-    runs-on: ubuntu-22.04
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Dependencies
         run: |
@@ -102,7 +120,7 @@ jobs:
           ARCH=x86_64 ./appimagetool.AppDir/AppRun AppDir Shizune-x86_64.AppImage
 
       - name: Upload AppImage Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: Shizune-x86_64.AppImage
           path: Shizune-x86_64.AppImage
