@@ -239,12 +239,10 @@ impl PulseAudioSink {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
 
-        let device = device.ok_or_else(|| {
-            SinkError::ServerUnavailable(format!(
-                "Virtual sink '{}' was created but not found in output devices. Refusing to play back into physical speakers.",
-                self.sink_name
-            ))
-        })?;
+        // If no direct null-sink PCM exists in ALSA, fallback to default output device with PULSE_SINK routing
+        let device = device
+            .or_else(|| host.default_output_device())
+            .ok_or_else(|| SinkError::ServerUnavailable("No audio output device available".into()))?;
 
         let default_config = device
             .default_output_config()
@@ -335,6 +333,51 @@ impl PulseAudioSink {
     }
 }
 
+/// Moves all active playback streams of this process to the specified virtual sink.
+pub fn move_current_process_sink_input_to(target_sink_name: &str) {
+    let my_pid = std::process::id().to_string();
+    let output = match Command::new("pactl")
+        .env("LC_ALL", "C")
+        .arg("list")
+        .arg("sink-inputs")
+        .output()
+    {
+        Ok(out) if out.status.success() => out.stdout,
+        _ => return,
+    };
+
+    let text = String::from_utf8_lossy(&output);
+    let mut current_id = None;
+    let mut is_my_process = false;
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(id_str) = trimmed.strip_prefix("Sink Input #") {
+            if let (Some(id), true) = (current_id.take(), is_my_process) {
+                let _ = Command::new("pactl")
+                    .arg("move-sink-input")
+                    .arg(&id)
+                    .arg(target_sink_name)
+                    .status();
+            }
+            current_id = id_str.trim().parse::<u32>().ok().map(|n| n.to_string());
+            is_my_process = false;
+        } else if trimmed.contains(&my_pid)
+            || trimmed.to_lowercase().contains("shizune")
+        {
+            is_my_process = true;
+        }
+    }
+
+    if let (Some(id), true) = (current_id, is_my_process) {
+        let _ = Command::new("pactl")
+            .arg("move-sink-input")
+            .arg(&id)
+            .arg(target_sink_name)
+            .status();
+    }
+}
+
 impl AudioSink for PulseAudioSink {
     fn start(&mut self) -> Result<(), SinkError> {
         if self.is_active() {
@@ -345,6 +388,11 @@ impl AudioSink for PulseAudioSink {
         // we continue with the local audio output fallback without aborting.
         let _ = self.setup_virtual_devices();
 
+        unsafe {
+            std::env::set_var("PULSE_SINK", &self.sink_name);
+            std::env::set_var("PIPEWIRE_NODE", &self.sink_name);
+        }
+
         let stream = self.build_playback_stream()?;
         stream
             .play()
@@ -352,6 +400,9 @@ impl AudioSink for PulseAudioSink {
 
         self.stream = Some(stream);
         self.active.store(true, Ordering::Release);
+
+        // Ensure playback stream is routed into the virtual sink
+        move_current_process_sink_input_to(&self.sink_name);
         Ok(())
     }
 

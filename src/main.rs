@@ -128,6 +128,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(ref dev_name) = resolved_device {
         unsafe {
             std::env::set_var("PULSE_SOURCE", dev_name);
+            std::env::set_var("PIPEWIRE_NODE", dev_name);
         }
     }
 

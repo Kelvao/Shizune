@@ -137,9 +137,8 @@ pub fn move_current_process_source_output_to(target_source_name: &str) {
             }
             current_id = id_str.trim().parse::<u32>().ok().map(|n| n.to_string());
             is_my_process = false;
-        } else if trimmed.contains(&format!("application.process.id = \"{my_pid}\""))
-            || trimmed.contains("application.process.binary = \"shizune\"")
-            || trimmed.contains("application.name = \"shizune\"")
+        } else if trimmed.contains(&my_pid)
+            || trimmed.to_lowercase().contains("shizune")
         {
             is_my_process = true;
         }
@@ -348,28 +347,43 @@ impl CpalAudioSource {
     }
 
     /// Switches the input stream to a specific AudioInputDevice.
-    /// Sets PULSE_SOURCE, moves existing PipeWire source-outputs, and rebuilds CPAL stream if needed.
+    /// Sets PULSE_SOURCE & PIPEWIRE_NODE, rebinds CPAL stream, and routes via PipeWire/pactl.
     pub fn switch_to_device(&mut self, device: Option<&AudioInputDevice>) -> Result<(), SourceError> {
         if let Some(dev) = device {
             unsafe {
                 std::env::set_var("PULSE_SOURCE", &dev.name);
+                std::env::set_var("PIPEWIRE_NODE", &dev.name);
             }
+            // Move any currently active stream in PipeWire/PulseAudio
             move_current_process_source_output_to(&dev.name);
 
-            // If the device directly corresponds to a CPAL ALSA device name, rebind CPAL stream
-            let is_direct_cpal_match = Self::list_input_devices()
-                .map(|list| list.iter().any(|d| d == &dev.name || d.contains(&dev.name)))
-                .unwrap_or(false);
+            // Rebuild capture stream so ALSA/PipeWire re-attaches to the newly selected device
+            let _ = self.stop();
 
-            if is_direct_cpal_match {
-                self.switch_device(Some(dev.name.clone()))?;
-            }
+            // Match against CPAL ALSA device names if available
+            let cpal_match = Self::list_input_devices()
+                .ok()
+                .and_then(|list| {
+                    list.into_iter().find(|d| {
+                        d == &dev.name
+                            || d.contains(&dev.name)
+                            || dev.name.contains(d.as_str())
+                            || dev.description.contains(d.as_str())
+                    })
+                });
+
+            self.device_name = cpal_match;
+            self.start()?;
+            move_current_process_source_output_to(&dev.name);
         } else {
             unsafe {
                 std::env::remove_var("PULSE_SOURCE");
+                std::env::remove_var("PIPEWIRE_NODE");
             }
+            let _ = self.stop();
+            self.device_name = None;
+            self.start()?;
             move_current_process_source_output_to("@DEFAULT_SOURCE@");
-            let _ = self.switch_device(None);
         }
         Ok(())
     }
