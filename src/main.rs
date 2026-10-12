@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -114,11 +116,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let engine_handle = engine.spawn(Arc::clone(&stop_signal));
 
-    let mut source = CpalAudioSource::new_with_device(pipeline.input_prod, input_device);
-    if let Err(e) = source.start() {
-        eprintln!("[Warning] Audio capture input not started: {e}");
-    } else {
-        println!("Microphone capture stream started.");
+    let source = Rc::new(RefCell::new(CpalAudioSource::new_with_device(
+        pipeline.input_prod,
+        input_device,
+    )));
+
+    if let Ok(mut src) = source.try_borrow_mut() {
+        if let Err(e) = src.start() {
+            eprintln!("[Warning] Audio capture input not started: {e}");
+        } else {
+            println!("Microphone capture stream started.");
+        }
     }
 
     let mut sink = create_audio_sink(pipeline.output_cons);
@@ -135,7 +143,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(feature = "gui")]
     if !headless {
         println!("Starting Slint control panel...");
-        if let Err(e) = launch_gui(Arc::clone(&state)) {
+        if let Err(e) = launch_gui(Arc::clone(&state), Rc::clone(&source)) {
             eprintln!("[Warning] GUI initialization failed ({e}). Falling back to headless terminal mode.");
             run_headless_loop = true;
         }
@@ -154,8 +162,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if stdin_rx.try_recv().is_ok() {
                 break;
             }
-            if !source.is_active() {
-                match source.reconnect_if_needed() {
+            if let Ok(mut src) = source.try_borrow_mut()
+                && !src.is_active()
+            {
+                match src.reconnect_if_needed() {
                     Ok(true) => println!("[Auto-Reconnect] Microphone reconnected successfully."),
                     Ok(false) => {}
                     Err(e) => eprintln!("[Auto-Reconnect] Failed to reconnect microphone: {e}"),
@@ -167,7 +177,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Shutting down Shizune...");
     stop_signal.store(true, Ordering::Relaxed);
-    let _ = source.stop();
+    if let Ok(mut src) = source.try_borrow_mut() {
+        let _ = src.stop();
+    }
     let _ = sink.stop();
     let _ = engine_handle.join();
     println!("Clean shutdown complete.");

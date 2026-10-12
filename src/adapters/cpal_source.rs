@@ -219,3 +219,40 @@ impl AudioSource for CpalAudioSource {
         self.active.load(Ordering::Acquire)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ringbuf::traits::Split;
+    use ringbuf::HeapRb;
+
+    #[test]
+    fn test_cpal_source_initial_state_and_stop() {
+        let rb = HeapRb::<f32>::new(480);
+        let (prod, _cons) = rb.split();
+        let mut source = CpalAudioSource::new(prod);
+        assert!(!source.is_active());
+        assert!(source.stop().is_ok());
+        assert!(!source.is_active());
+    }
+
+    #[test]
+    fn test_cpal_reconnect_nonexistent_device_returns_false() {
+        let rb = HeapRb::<f32>::new(480);
+        let (prod, _cons) = rb.split();
+        let mut source = CpalAudioSource::new_with_device(
+            prod,
+            Some("NonExistentDevice_XYZ_12345".to_string()),
+        );
+        assert!(!source.is_active());
+        // Attempting reconnection to a nonexistent device should safely return Ok(false)
+        let reconnected = source.reconnect_if_needed();
+        assert_eq!(reconnected.unwrap(), false);
+        assert!(!source.is_active());
+    }
+
+    #[test]
+    fn test_silence_alsa_logging_does_not_panic() {
+        silence_alsa_logging();
+    }
+}

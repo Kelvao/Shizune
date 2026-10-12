@@ -57,11 +57,19 @@ slint::slint! {
     }
 }
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
+
+use crate::adapters::cpal_source::CpalAudioSource;
 use crate::domain::state::EngineState;
+use crate::ports::source::AudioSource;
 
 #[cfg(feature = "gui")]
-pub fn launch_gui(state: Arc<EngineState>) -> Result<(), Box<dyn std::error::Error>> {
+pub fn launch_gui(
+    state: Arc<EngineState>,
+    source: Rc<RefCell<CpalAudioSource>>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let window = MainWindow::new()?;
 
     window.set_attenuation_db(state.attenuation_limit.get());
@@ -77,12 +85,33 @@ pub fn launch_gui(state: Arc<EngineState>) -> Result<(), Box<dyn std::error::Err
         state_enabled.set_enabled(enabled);
     });
 
+    let timer = slint::Timer::default();
+    let source_clone = Rc::clone(&source);
+    timer.start(
+        slint::TimerMode::Repeated,
+        std::time::Duration::from_millis(500),
+        move || {
+            if let Ok(mut src) = source_clone.try_borrow_mut()
+                && !src.is_active()
+            {
+                match src.reconnect_if_needed() {
+                    Ok(true) => println!("[Auto-Reconnect] Microphone reconnected successfully."),
+                    Ok(false) => {}
+                    Err(e) => eprintln!("[Auto-Reconnect] Failed to reconnect microphone: {e}"),
+                }
+            }
+        },
+    );
+
     window.run()?;
     Ok(())
 }
 
 #[cfg(not(feature = "gui"))]
-pub fn launch_gui(_state: Arc<EngineState>) -> Result<(), Box<dyn std::error::Error>> {
+pub fn launch_gui(
+    _state: Arc<EngineState>,
+    _source: Rc<RefCell<CpalAudioSource>>,
+) -> Result<(), Box<dyn std::error::Error>> {
     println!("GUI feature is disabled. Run with --features gui to enable Slint panel.");
     Ok(())
 }
