@@ -88,8 +88,6 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use cpal::traits::{DeviceTrait, HostTrait};
-
 use crate::adapters::cpal_source::CpalAudioSource;
 use crate::domain::state::EngineState;
 use crate::ports::source::AudioSource;
@@ -101,20 +99,28 @@ pub fn launch_gui(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let window = MainWindow::new()?;
 
-    // Populate physical input devices list
-    let host = cpal::default_host();
-    let default_name = host.default_input_device().and_then(|d| d.name().ok());
-    let default_label = match default_name {
-        Some(ref name) => format!("Default System Microphone ({name})"),
+    // Populate physical input devices list using PipeWire/PulseAudio descriptions
+    let system_devices = crate::adapters::cpal_source::list_system_input_devices();
+    let mut dev_list: Vec<slint::SharedString> = Vec::new();
+
+    let default_source_name = crate::adapters::output::get_system_default_source();
+    let default_desc = default_source_name.as_deref().and_then(|ds_name| {
+        system_devices
+            .iter()
+            .find(|d| d.name == ds_name)
+            .map(|d| d.description.as_str())
+    });
+
+    let default_label = match default_desc {
+        Some(desc) => format!("Default System Microphone ({desc})"),
         None => "Default System Microphone".to_string(),
     };
-
-    let available_devices = CpalAudioSource::list_input_devices().unwrap_or_default();
-    let mut dev_list: Vec<slint::SharedString> = Vec::new();
     dev_list.push(default_label.as_str().into());
-    for dev in available_devices {
-        dev_list.push(dev.into());
+
+    for dev in &system_devices {
+        dev_list.push(dev.description.as_str().into());
     }
+
     let model = std::rc::Rc::new(slint::VecModel::from(dev_list));
     window.set_input_devices(model.into());
     window.set_selected_device(default_label.as_str().into());
@@ -133,16 +139,22 @@ pub fn launch_gui(
     });
 
     let source_for_dev = Rc::clone(&source);
+    let devices_clone = system_devices;
     window.on_device_selected(move |val| {
         let selected_str = val.to_string();
-        let target = if selected_str.starts_with("Default System Microphone") {
-            None
-        } else {
-            Some(selected_str.clone())
-        };
         println!("[Audio Input] Selected physical microphone: {selected_str}");
+        let matching_dev = devices_clone.iter().find(|d| d.description == selected_str);
+
         if let Ok(mut src) = source_for_dev.try_borrow_mut() {
-            if let Err(e) = src.switch_device(target) {
+            let res = if selected_str.starts_with("Default System Microphone") {
+                src.switch_to_device(None)
+            } else if let Some(dev) = matching_dev {
+                src.switch_to_device(Some(dev))
+            } else {
+                src.switch_device(Some(selected_str.clone()))
+            };
+
+            if let Err(e) = res {
                 eprintln!("[Warning] Failed to switch microphone: {e}");
             } else {
                 println!("[Audio Input] Switched input to: {selected_str} -> Filtering into Shizune_Virtual_Mic");
@@ -156,6 +168,10 @@ pub fn launch_gui(
         slint::TimerMode::Repeated,
         std::time::Duration::from_millis(500),
         move || {
+            if crate::domain::state::TERMINATE_SIGNAL.load(std::sync::atomic::Ordering::Acquire) {
+                let _ = slint::quit_event_loop();
+                return;
+            }
             if let Ok(mut src) = source_clone.try_borrow_mut()
                 && !src.is_active()
             {

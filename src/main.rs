@@ -21,6 +21,7 @@ fn print_help() {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    shizune::domain::state::setup_signal_handlers();
     let args: Vec<String> = std::env::args().collect();
     let mut input_device: Option<String> = None;
     let mut initial_attenuation: Option<f32> = None;
@@ -34,13 +35,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--list-devices" => {
                 println!("=== Available Input Devices ===");
-                match CpalAudioSource::list_input_devices() {
-                    Ok(devices) => {
-                        for d in devices {
-                            println!("  - {d}");
-                        }
+                let devices = shizune::adapters::cpal_source::list_system_input_devices();
+                if devices.is_empty() {
+                    println!("  (No physical input microphones detected)");
+                } else {
+                    for d in devices {
+                        println!("  - {} (device: {})", d.description, d.name);
                     }
-                    Err(e) => eprintln!("Error listing input devices: {e}"),
                 }
                 println!("\n=== Available Output Devices ===");
                 match shizune::adapters::output::PulseAudioSink::list_output_devices() {
@@ -116,9 +117,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let engine_handle = engine.spawn(Arc::clone(&stop_signal));
 
+    let sys_inputs = shizune::adapters::cpal_source::list_system_input_devices();
+    let resolved_device = input_device.as_ref().and_then(|query| {
+        sys_inputs
+            .iter()
+            .find(|d| d.description.to_lowercase().contains(&query.to_lowercase()) || d.name.contains(query))
+            .map(|d| d.name.clone())
+    }).or(input_device);
+
+    if let Some(ref dev_name) = resolved_device {
+        unsafe {
+            std::env::set_var("PULSE_SOURCE", dev_name);
+        }
+    }
+
     let source = Rc::new(RefCell::new(CpalAudioSource::new_with_device(
         pipeline.input_prod,
-        input_device,
+        resolved_device,
     )));
 
     if let Ok(mut src) = source.try_borrow_mut() {
@@ -139,14 +154,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("=== Available Microphone Inputs ===");
-    match CpalAudioSource::list_input_devices() {
-        Ok(devices) if !devices.is_empty() => {
-            for (idx, d) in devices.iter().enumerate() {
-                println!("  [{}] {d}", idx + 1);
-            }
+    if sys_inputs.is_empty() {
+        println!("  (No physical input microphones detected; using system default)");
+    } else {
+        for (idx, d) in sys_inputs.iter().enumerate() {
+            println!("  [{}] {} (device: {})", idx + 1, d.description, d.name);
         }
-        Ok(_) => println!("  (No physical input microphones detected; using system default)"),
-        Err(e) => eprintln!("  [Warning] Could not list input devices: {e}"),
     }
 
     println!("Audio engine and I/O adapters initialized and running.");
@@ -172,7 +185,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
 
         loop {
-            if stdin_rx.try_recv().is_ok() {
+            if shizune::domain::state::TERMINATE_SIGNAL.load(Ordering::Acquire)
+                || stdin_rx.try_recv().is_ok()
+            {
                 break;
             }
             if let Ok(mut src) = source.try_borrow_mut()

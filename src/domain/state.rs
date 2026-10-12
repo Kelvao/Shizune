@@ -78,6 +78,25 @@ impl EngineState {
     }
 }
 
+pub static TERMINATE_SIGNAL: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn sig_handler(_sig: i32) {
+    TERMINATE_SIGNAL.store(true, Ordering::Release);
+}
+
+/// Registers POSIX signal handlers for SIGINT and SIGTERM to enable graceful cleanup.
+pub fn setup_signal_handlers() {
+    unsafe {
+        unsafe extern "C" {
+            fn signal(sig: i32, handler: extern "C" fn(i32)) -> usize;
+        }
+        const SIGINT: i32 = 2;
+        const SIGTERM: i32 = 15;
+        let _ = signal(SIGINT, sig_handler);
+        let _ = signal(SIGTERM, sig_handler);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,5 +133,14 @@ mod tests {
 
         state.attenuation_limit.set(40.0);
         assert_eq!(state.attenuation_limit.get(), 40.0);
+    }
+
+    #[test]
+    fn test_setup_signal_handlers_and_terminate_signal() {
+        setup_signal_handlers();
+        assert!(!TERMINATE_SIGNAL.load(Ordering::Acquire));
+        TERMINATE_SIGNAL.store(true, Ordering::Release);
+        assert!(TERMINATE_SIGNAL.load(Ordering::Acquire));
+        TERMINATE_SIGNAL.store(false, Ordering::Release);
     }
 }

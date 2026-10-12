@@ -79,6 +79,14 @@ impl<P: AudioProcessor> AudioEngine<P> {
             return false;
         }
 
+        // Prevent creeping latency: if input buffer accumulates a large backlog (> 4 frames = 40ms),
+        // skip older stale samples to bound real-time latency.
+        let occupied = self.input_cons.occupied_len();
+        if occupied > 4 * self.frame_size {
+            let excess = occupied - (2 * self.frame_size);
+            self.input_cons.skip(excess);
+        }
+
         self.input_cons.pop_slice(&mut in_buf[..self.frame_size]);
 
         if self.state.is_enabled() {

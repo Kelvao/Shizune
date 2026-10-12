@@ -33,6 +33,22 @@ pub fn detect_pipewire_socket() -> bool {
     socket_path.exists()
 }
 
+/// Retrieves the current system default recording source via pactl.
+pub fn get_system_default_source() -> Option<String> {
+    if let Ok(output) = Command::new("pactl")
+        .env("LC_ALL", "C")
+        .arg("get-default-source")
+        .output()
+        && output.status.success()
+    {
+        let prev = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !prev.is_empty() {
+            return Some(prev);
+        }
+    }
+    None
+}
+
 /// RAII manager for modules loaded via pactl.
 pub struct PactlManager {
     loaded_module_ids: Vec<String>,
@@ -96,8 +112,35 @@ impl Drop for PactlManager {
     }
 }
 
-/// Output adapter using PulseAudio null sink fallback with CPAL playback.
 use std::sync::Mutex;
+
+/// Unloads any stale modules left by previous crashes or unclean shutdowns.
+fn unload_stale_modules(sink_name: &str, source_name: &str) {
+    let output = match Command::new("pactl")
+        .env("LC_ALL", "C")
+        .arg("list")
+        .arg("modules")
+        .arg("short")
+        .output()
+    {
+        Ok(out) if out.status.success() => out.stdout,
+        _ => return,
+    };
+
+    let text = String::from_utf8_lossy(&output);
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if (trimmed.contains(sink_name) || trimmed.contains(source_name))
+            && let Some(id_str) = trimmed.split_whitespace().next()
+            && id_str.parse::<u32>().is_ok()
+        {
+            let _ = Command::new("pactl")
+                .arg("unload-module")
+                .arg(id_str)
+                .status();
+        }
+    }
+}
 
 /// Output adapter using PulseAudio null sink fallback with CPAL playback.
 pub struct PulseAudioSink {
@@ -142,6 +185,8 @@ impl PulseAudioSink {
     }
 
     fn setup_virtual_devices(&mut self) -> Result<(), SinkError> {
+        unload_stale_modules(&self.sink_name, &self.source_name);
+
         let sink_prop = format!("sink_properties=device.description={}", self.sink_name);
         let sink_arg = format!("sink_name={}", self.sink_name);
         self.pactl
@@ -231,6 +276,7 @@ impl PulseAudioSink {
                                 data[popped..].fill(0.0);
                             }
                         } else {
+                            data.fill(0.0);
                             for frame in data.chunks_exact_mut(ch_count) {
                                 let sample = cons.try_pop().unwrap_or(0.0);
                                 frame.fill(sample);
@@ -249,6 +295,7 @@ impl PulseAudioSink {
                     if let Ok(mut guard) = consumer_holder.try_lock()
                         && let Some(ref mut cons) = *guard
                     {
+                        data.fill(0);
                         for frame in data.chunks_exact_mut(ch_count) {
                             let sample_f32 = cons.try_pop().unwrap_or(0.0);
                             let sample_i16 = (sample_f32 * i16::MAX as f32) as i16;
@@ -267,6 +314,7 @@ impl PulseAudioSink {
                     if let Ok(mut guard) = consumer_holder.try_lock()
                         && let Some(ref mut cons) = *guard
                     {
+                        data.fill(u16::MAX / 2);
                         for frame in data.chunks_exact_mut(ch_count) {
                             let sample_f32 = cons.try_pop().unwrap_or(0.0);
                             let sample_u16 = (((sample_f32 + 1.0) * 0.5) * u16::MAX as f32) as u16;
