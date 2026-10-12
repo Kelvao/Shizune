@@ -138,6 +138,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("[Info] In voice apps (Discord, OBS, Steam), select 'Shizune_Virtual_Mic' or 'Default' to use filtered audio.");
     }
 
+    println!("=== Available Microphone Inputs ===");
+    match CpalAudioSource::list_input_devices() {
+        Ok(devices) if !devices.is_empty() => {
+            for (idx, d) in devices.iter().enumerate() {
+                println!("  [{}] {d}", idx + 1);
+            }
+        }
+        Ok(_) => println!("  (No physical input microphones detected; using system default)"),
+        Err(e) => eprintln!("  [Warning] Could not list input devices: {e}"),
+    }
+
     println!("Audio engine and I/O adapters initialized and running.");
 
     #[allow(unused_mut)]

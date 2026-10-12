@@ -49,14 +49,18 @@ impl CpalAudioSource {
         }
     }
 
-    /// Lists all available input audio device names on the default CPAL host.
+    /// Lists all available physical input audio device names on the default CPAL host,
+    /// excluding virtual sinks and monitors to prevent audio feedback loops.
     pub fn list_input_devices() -> Result<Vec<String>, SourceError> {
         silence_alsa_logging();
         let host = cpal::default_host();
         let devices = host
             .input_devices()
             .map_err(|e| SourceError::StreamConfigError(e.to_string()))?;
-        let names = devices.filter_map(|d| d.name().ok()).collect();
+        let names = devices
+            .filter_map(|d| d.name().ok())
+            .filter(|name| !name.contains("Shizune") && !name.contains("null-sink"))
+            .collect();
         Ok(names)
     }
 
@@ -65,7 +69,7 @@ impl CpalAudioSource {
         let device = if let Some(ref name) = self.device_name {
             host.input_devices()
                 .map_err(|e| SourceError::StreamConfigError(e.to_string()))?
-                .find(|d| d.name().map(|n| n.contains(name)).unwrap_or(false))
+                .find(|d| d.name().map(|n| n == *name || n.contains(name)).unwrap_or(false))
                 .ok_or(SourceError::DeviceNotFound)?
         } else {
             host.default_input_device()
@@ -189,6 +193,14 @@ impl CpalAudioSource {
         }
         Ok(false)
     }
+
+    /// Switches to a different physical microphone device, stopping the current stream and rebuilding it.
+    pub fn switch_device(&mut self, new_device_name: Option<String>) -> Result<(), SourceError> {
+        let _ = self.stop();
+        self.device_name = new_device_name;
+        self.start()?;
+        Ok(())
+    }
 }
 
 impl AudioSource for CpalAudioSource {
@@ -248,6 +260,16 @@ mod tests {
         // Attempting reconnection to a nonexistent device should safely return Ok(false)
         let reconnected = source.reconnect_if_needed();
         assert_eq!(reconnected.unwrap(), false);
+        assert!(!source.is_active());
+    }
+
+    #[test]
+    fn test_cpal_switch_device_nonexistent() {
+        let rb = HeapRb::<f32>::new(480);
+        let (prod, _cons) = rb.split();
+        let mut source = CpalAudioSource::new(prod);
+        let result = source.switch_device(Some("NonExistentDevice_XYZ_99999".to_string()));
+        assert!(result.is_err());
         assert!(!source.is_active());
     }
 
